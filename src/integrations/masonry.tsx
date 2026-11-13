@@ -142,18 +142,18 @@ function findFirstStartingBelow(layout: MasonryLayout, positions: number[], colu
     return low;
 }
 
-// The core stores a fixed size under the item's key and never asks again, so a new
-// item object under the same key must be re-asked or it keeps its old height.
+// The core stores a size under the item's key and never asks for a fixed one again, so a
+// new item object under the same key must be re-asked or it keeps its old height. That
+// includes a key that so far has only an estimate, which the core prefers to asking.
 function refreshFixedSize(ctx: MasonryLayoutContext, key: string, index: number, item: unknown) {
     const {
         props: { getFixedItemSize, getItemType },
         sizes,
         sizesKnown,
     } = ctx.state;
-    const knownSize = sizesKnown.get(key);
-    if (knownSize !== undefined && getFixedItemSize) {
+    if (getFixedItemSize) {
         const fixedSize = getFixedItemSize(item, index, getItemType ? (getItemType(item, index) ?? "") : "");
-        if (fixedSize !== undefined && fixedSize + ctx.scrollAxisGap !== knownSize) {
+        if (fixedSize !== undefined && fixedSize + ctx.scrollAxisGap !== sizesKnown.get(key)) {
             sizesKnown.set(key, fixedSize + ctx.scrollAxisGap);
             sizes.set(key, fixedSize + ctx.scrollAxisGap);
         }

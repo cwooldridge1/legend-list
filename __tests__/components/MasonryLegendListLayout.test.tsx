@@ -349,6 +349,26 @@ describe("MasonryLegendList layout", () => {
         await list.unmount();
     });
 
+    it("takes a fixed height a card gains after it was estimated, even off screen", async () => {
+        const heights = Array.from({ length: 40 }, (_, index) => 60 + ((index * 37) % 140));
+        const unsized = heights.map((_, index) => ({ id: `card-${index}` }));
+        const list = await mountMasonry({ data: unsized, numColumns: 2 });
+        expect(list.positions(heights.length)).toEqual(
+            placeCards(
+                heights.map(() => 100),
+                2,
+            ).tops,
+        );
+
+        const sized = heights.map((height, index) => ({ height, id: `card-${index}` }));
+        await list.update({ data: sized, numColumns: 2 });
+
+        expect(list.ctx.state.containerItemKeys.has("card-30")).toBe(false);
+        expect(list.positions(heights.length)).toEqual(placeCards(heights, 2).tops);
+        expect(list.ref.current?.getState().contentLength).toBe(Math.max(...placeCards(heights, 2).columnHeights));
+        await list.unmount();
+    });
+
     it("does not anchor the first visible card when data changes", async () => {
         const cards = makeCards(60, (index) => 80 + ((index * 41) % 120));
         const list = await mountMasonry({ data: cards, maintainVisibleContentPosition: false, numColumns: 2 });
