@@ -1,4 +1,4 @@
-import { checkFinishedScrollFallback } from "@/core/checkFinishedScroll";
+import { checkFinishedScroll, checkFinishedScrollFallback } from "@/core/checkFinishedScroll";
 import type { DoScrollToParams } from "@/core/doScrollParams";
 import { initialScrollCompletion } from "@/core/initialScrollSession";
 import { getContentSize } from "@/state/getContentSize";
@@ -31,7 +31,12 @@ export function doScrollTo(ctx: StateContext, params: DoScrollToParams) {
 
     // If it's animated we can rely on onMomentumScrollEnd to call finishScrollTo
     // so if it's not aniamted we set it up here
-    if (!isAnimated) {
+    if (isAnimated) {
+        // Native emits no scroll or momentum event for a scroll to where it already rests.
+        if (Math.abs(state.scroll - offset) <= 1) {
+            checkFinishedScroll(ctx);
+        }
+    } else {
         state.scroll = offset;
 
         checkFinishedScrollFallback(ctx);
