@@ -50,6 +50,11 @@ export function setHeaderSize(ctx: StateContext, size: number) {
         if (hasMeasuredOrEstimatedHeaderBaseline && shouldAdjustForHeaderSizeChange(ctx, previousHeaderSize, size)) {
             requestAdjust(ctx, size - previousHeaderSize);
         }
+
+        // Masonry only: a header resize moves the range without a scroll event to recalculate it.
+        if (state.props.layoutStrategyInternal) {
+            state.triggerCalculateItemsInView?.();
+        }
     }
 
     state.didMeasureHeader = true;

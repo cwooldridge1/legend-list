@@ -55,6 +55,11 @@ export type LayoutStrategy = ((
     dependencies: LayoutStrategyDependencies,
 ) => void) & {
     findStartIndex?: (ctx: StateContext, startIndex: number, scrollTop: number) => number;
+    getScrollWindow?: (
+        ctx: StateContext,
+        scrollTopBuffered: number,
+        scrollBottomBuffered: number,
+    ) => { bottom: number | null; top: number | null };
 };
 
 export interface ScrollEventTargetLike {

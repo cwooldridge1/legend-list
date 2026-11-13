@@ -474,7 +474,6 @@ export function calculateItemsInView(
 
         // Check precomputed scroll range to see if we can skip this check
         if (
-            !state.props.layoutStrategyInternal?.findStartIndex &&
             enableScrollForNextCalculateItemsInView &&
             !suppressInitialScrollSideEffects &&
             !dataChanged &&
@@ -679,16 +678,18 @@ export function calculateItemsInView(
             startNoBuffer: visibleRange.startNoBuffer,
         });
 
+        if (findLayoutStart) {
+            // Independent columns each have their own edges, so the row edges found above do not apply.
+            ({ bottom: nextBottom, top: nextTop } = state.props.layoutStrategyInternal!.getScrollWindow?.(
+                ctx,
+                scrollTopBuffered,
+                scrollBottomBuffered,
+            ) ?? { bottom: null, top: null });
+        }
+
         // Precompute the scroll that will be needed for the range to change
         // so it can be skipped if not needed
-        // The row cache has one top/bottom boundary; independent columns need
-        // separate boundaries or small reverse scrolls can skip newly visible cells.
-        if (
-            !findLayoutStart &&
-            enableScrollForNextCalculateItemsInView &&
-            nextTop !== undefined &&
-            nextBottom !== undefined
-        ) {
+        if (enableScrollForNextCalculateItemsInView && nextTop !== undefined && nextBottom !== undefined) {
             state.scrollForNextCalculateItemsInView =
                 isNullOrUndefined(nextTop) && isNullOrUndefined(nextBottom)
                     ? undefined

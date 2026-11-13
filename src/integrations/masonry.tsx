@@ -15,9 +15,12 @@ type MasonryLayoutState = {
     columnSpans: number[];
     idCache: string[];
     indexByKey: Map<string, number>;
+    minIndexSizeChanged: number | undefined;
     positions: number[];
     props: {
         data: readonly unknown[];
+        getFixedItemSize: ((item: any, index: number, type: any) => number | undefined) | undefined;
+        getItemType: ((item: any, index: number) => unknown) | undefined;
     };
     scrollAdjustHandler: {
         getAdjust: () => number;
@@ -31,6 +34,7 @@ type MasonryLayoutContext = {
     positionListeners: {
         size: number;
     };
+    scrollAxisGap: number;
     state: MasonryLayoutState;
     values: {
         get: (key: string) => unknown;
@@ -54,6 +58,108 @@ type MasonryLayoutDependencies = {
     setTotalSize: (ctx: MasonryLayoutContext, totalSize: number) => void;
 };
 
+// Items in a column touch, so an item's bottom is the next item's top in its column,
+// or the column height for the last one. Every item below placedCount is in columnItems.
+type MasonryLayout = {
+    columnHeights: number[];
+    columnItems: number[][];
+    // Items below knownCount have known sizes, so their positions hold until a size or data change below it.
+    knownCount: number;
+    numColumns: number;
+    placedCount: number;
+    resolvedItems: Map<string, unknown>;
+};
+
+const layouts = new WeakMap<MasonryLayoutState, MasonryLayout>();
+
+function getNumColumns(ctx: MasonryLayoutContext) {
+    const numColumnsValue = ctx.values.get("numColumns");
+    return typeof numColumnsValue === "number" && Number.isFinite(numColumnsValue)
+        ? Math.max(1, Math.floor(numColumnsValue))
+        : 1;
+}
+
+function resetLayout(layout: MasonryLayout, numColumns: number) {
+    layout.columnHeights = Array<number>(numColumns).fill(0);
+    layout.columnItems = Array.from({ length: numColumns }, () => []);
+    layout.knownCount = 0;
+    layout.numColumns = numColumns;
+    layout.placedCount = 0;
+}
+
+function getLayout(state: MasonryLayoutState, numColumns: number) {
+    let layout = layouts.get(state);
+    if (!layout) {
+        layout = {
+            columnHeights: [],
+            columnItems: [],
+            knownCount: 0,
+            numColumns,
+            placedCount: 0,
+            resolvedItems: new Map(),
+        };
+        resetLayout(layout, numColumns);
+        layouts.set(state, layout);
+    }
+    return layout;
+}
+
+function getItemBottom(layout: MasonryLayout, positions: number[], column: number, itemIndexInColumn: number) {
+    const items = layout.columnItems[column];
+    return itemIndexInColumn + 1 < items.length
+        ? positions[items[itemIndexInColumn + 1]]
+        : layout.columnHeights[column];
+}
+
+// Returns the first slot in the column whose item ends below scrollTop.
+function findFirstBelow(layout: MasonryLayout, positions: number[], column: number, scrollTop: number) {
+    let low = 0;
+    let high = layout.columnItems[column].length;
+    while (low < high) {
+        const mid = (low + high) >>> 1;
+        if (getItemBottom(layout, positions, column, mid) > scrollTop) {
+            high = mid;
+        } else {
+            low = mid + 1;
+        }
+    }
+    return low;
+}
+
+// Returns the first slot in the column whose item starts below scrollBottom.
+function findFirstStartingBelow(layout: MasonryLayout, positions: number[], column: number, scrollBottom: number) {
+    const items = layout.columnItems[column];
+    let low = 0;
+    let high = items.length;
+    while (low < high) {
+        const mid = (low + high) >>> 1;
+        if (positions[items[mid]] > scrollBottom) {
+            high = mid;
+        } else {
+            low = mid + 1;
+        }
+    }
+    return low;
+}
+
+// The core stores a fixed size under the item's key and never asks again, so a new
+// item object under the same key must be re-asked or it keeps its old height.
+function refreshFixedSize(ctx: MasonryLayoutContext, key: string, index: number, item: unknown) {
+    const {
+        props: { getFixedItemSize, getItemType },
+        sizes,
+        sizesKnown,
+    } = ctx.state;
+    const knownSize = sizesKnown.get(key);
+    if (knownSize !== undefined && getFixedItemSize) {
+        const fixedSize = getFixedItemSize(item, index, getItemType ? (getItemType(item, index) ?? "") : "");
+        if (fixedSize !== undefined && fixedSize + ctx.scrollAxisGap !== knownSize) {
+            sizesKnown.set(key, fixedSize + ctx.scrollAxisGap);
+            sizes.set(key, fixedSize + ctx.scrollAxisGap);
+        }
+    }
+}
+
 function updateMasonryItemPositions(
     ctx: MasonryLayoutContext,
     dataChanged: boolean | undefined,
@@ -74,15 +180,12 @@ function updateMasonryItemPositions(
         idCache,
         indexByKey,
         positions,
-        props: { data },
+        props: { data, getFixedItemSize },
         sizesKnown,
     } = state;
     const dataLength = data.length;
-    const numColumnsValue = ctx.values.get("numColumns");
-    const numColumns =
-        typeof numColumnsValue === "number" && Number.isFinite(numColumnsValue)
-            ? Math.max(1, Math.floor(numColumnsValue))
-            : 1;
+    const numColumns = getNumColumns(ctx);
+    const layout = getLayout(state, numColumns);
     const pendingScrollAdjust = ctx.values.get("scrollAdjustPending");
     const useAverageSize = true;
     const preferCachedSize =
@@ -91,60 +194,72 @@ function updateMasonryItemPositions(
         state.scrollAdjustHandler.getAdjust() !== 0 ||
         (typeof pendingScrollAdjust === "number" ? pendingScrollAdjust : 0) !== 0;
     const notifyTotalSizeWhileCachingSizes = false;
+    const needsIndexByKey = dataChanged || indexByKey.size === 0;
+
+    if (
+        needsIndexByKey ||
+        options.forceFullUpdate ||
+        layout.numColumns !== numColumns ||
+        positions.length < layout.knownCount
+    ) {
+        resetLayout(layout, numColumns);
+    }
 
     if (dataLength === 0) {
         columns.length = 0;
         columnSpans.length = 0;
         positions.length = 0;
+        layout.resolvedItems.clear();
         dependencies.setTotalSize(ctx, 0);
         return;
     }
 
-    let startIndex = options.forceFullUpdate || dataChanged ? 0 : Math.max(0, options.startIndex);
-    const columnHeights = Array<number>(numColumns).fill(0);
-
-    if (startIndex > 0) {
-        const foundColumns = new Set<number>();
-        for (let index = startIndex - 1; index >= 0 && foundColumns.size < numColumns; index--) {
-            const column = columns[index];
-            const position = positions[index];
-            if (column === undefined || position === undefined) {
-                startIndex = 0;
-                columnHeights.fill(0);
-                break;
-            }
-            if (!foundColumns.has(column)) {
-                const key = idCache[index] ?? dependencies.getId(state, index);
-                const size =
-                    sizesKnown.get(key) ??
-                    dependencies.getItemSize(
-                        ctx,
-                        key,
-                        index,
-                        data[index],
-                        useAverageSize,
-                        preferCachedSize,
-                        notifyTotalSizeWhileCachingSizes,
-                    );
-                columnHeights[column - 1] = position + size;
-                foundColumns.add(column);
-            }
-        }
+    if (state.minIndexSizeChanged !== undefined) {
+        layout.knownCount = Math.min(layout.knownCount, state.minIndexSizeChanged);
+    }
+    const startIndex = Math.min(layout.placedCount, Math.max(0, options.startIndex, layout.knownCount));
+    if (startIndex >= dataLength) {
+        return;
     }
 
+    const { columnHeights, columnItems } = layout;
+    const getSize = (key: string, itemIndex: number) =>
+        sizesKnown.get(key) ??
+        dependencies.getItemSize(
+            ctx,
+            key,
+            itemIndex,
+            data[itemIndex],
+            useAverageSize,
+            preferCachedSize,
+            notifyTotalSizeWhileCachingSizes,
+        );
+
+    for (let column = 0; column < numColumns; column++) {
+        const items = columnItems[column];
+        while (items.length > 0 && items[items.length - 1] >= startIndex) {
+            items.pop();
+        }
+        const lastIndex = items[items.length - 1];
+        columnHeights[column] =
+            lastIndex === undefined
+                ? 0
+                : positions[lastIndex] + getSize(idCache[lastIndex] ?? dependencies.getId(state, lastIndex), lastIndex);
+    }
+
+    const previousResolvedItems = dataChanged && getFixedItemSize ? layout.resolvedItems : undefined;
+    const resolvedItems = previousResolvedItems ? new Map<string, unknown>() : undefined;
     const hasPositionListeners = ctx.positionListeners.size > 0;
-    const needsIndexByKey = dataChanged || indexByKey.size === 0;
     const indexByKeyForChecking = dependencies.isDev && needsIndexByKey ? new Map<string, number>() : undefined;
     const velocity = options.scrollVelocity ?? dependencies.getScrollVelocity(state);
     const shouldOptimize =
         !options.forceFullUpdate && !dataChanged && (options.optimizeForVisibleWindow || Math.abs(velocity) > 0);
     const maxVisibleArea = options.scrollBottomBuffered + 1000;
     let breakAt: number | undefined;
-    let didBreakEarly = false;
+    let index = startIndex;
 
-    for (let index = startIndex; index < dataLength; index++) {
+    for (; index < dataLength; index++) {
         if (shouldOptimize && breakAt !== undefined && index > breakAt) {
-            didBreakEarly = true;
             break;
         }
 
@@ -168,17 +283,17 @@ function updateMasonryItemPositions(
         }
 
         const key = idCache[index] ?? dependencies.getId(state, index);
-        const size =
-            sizesKnown.get(key) ??
-            dependencies.getItemSize(
-                ctx,
-                key,
-                index,
-                data[index],
-                useAverageSize,
-                preferCachedSize,
-                notifyTotalSizeWhileCachingSizes,
-            );
+        if (resolvedItems) {
+            const item = data[index];
+            if (previousResolvedItems!.get(key) !== item) {
+                refreshFixedSize(ctx, key, index, item);
+            }
+            resolvedItems.set(key, item);
+        }
+        const size = getSize(key, index);
+        if (index === layout.knownCount && sizesKnown.has(key)) {
+            layout.knownCount = index + 1;
+        }
 
         if (indexByKeyForChecking) {
             if (indexByKeyForChecking.has(key)) {
@@ -197,6 +312,7 @@ function updateMasonryItemPositions(
         }
         columns[index] = columnIndex + 1;
         columnSpans[index] = 1;
+        columnItems[columnIndex].push(index);
         columnHeights[columnIndex] = position + size;
 
         if (needsIndexByKey) {
@@ -204,36 +320,64 @@ function updateMasonryItemPositions(
         }
     }
 
-    if (!didBreakEarly) {
+    layout.placedCount = index;
+    if (resolvedItems) {
+        layout.resolvedItems = resolvedItems;
+    }
+
+    if (index === dataLength) {
         dependencies.setTotalSize(ctx, Math.max(...columnHeights));
     }
 }
 
-// Masonry item bottoms are not ordered across columns. A short offscreen card
-// cannot prove that an earlier tall card in another column is also offscreen.
-updateMasonryItemPositions.findStartIndex = (ctx: MasonryLayoutContext, startIndex: number, scrollTop: number) => {
-    const { columns, positions, idCache, sizes } = ctx.state;
-    const numColumns = ctx.values.get("numColumns") as number;
-    const completedColumns = new Set<number>();
-    let firstIndex = startIndex;
-    for (let index = startIndex; index >= 0 && completedColumns.size < numColumns; index--) {
-        const column = columns[index];
-        const position = positions[index];
-        if (column === undefined || position === undefined) {
+// Masonry item bottoms are not ordered across columns, so the first item in range is
+// the earliest of each column's first item that ends below scrollTop.
+updateMasonryItemPositions.findStartIndex = (ctx: MasonryLayoutContext, _startIndex: number, scrollTop: number) => {
+    const { positions } = ctx.state;
+    const layout = getLayout(ctx.state, getNumColumns(ctx));
+    let firstIndex = layout.placedCount;
+    for (let column = 0; column < layout.numColumns; column++) {
+        const slot = findFirstBelow(layout, positions, column, scrollTop);
+        const index = layout.columnItems[column][slot];
+        if (index !== undefined && index < firstIndex) {
             firstIndex = index;
-            continue;
-        }
-        if (completedColumns.has(column)) continue;
-        const key = idCache[index];
-        const size = sizes.get(key) ?? ctx.state.sizesKnown.get(key);
-        // Unknown measurements must not exclude a potentially visible item.
-        if (size === undefined || position + size > scrollTop) {
-            firstIndex = index;
-        } else {
-            completedColumns.add(column);
         }
     }
-    return firstIndex;
+    return Math.min(firstIndex, Math.max(0, ctx.state.props.data.length - 1));
+};
+
+// The range changes only when an edge crosses a column boundary: the top edge moving
+// above the bottom of a column's last item before the range, or the bottom edge
+// reaching the top of a column's first item after it.
+updateMasonryItemPositions.getScrollWindow = (
+    ctx: MasonryLayoutContext,
+    scrollTopBuffered: number,
+    scrollBottomBuffered: number,
+) => {
+    const { positions } = ctx.state;
+    const layout = getLayout(ctx.state, getNumColumns(ctx));
+    const isPlacementComplete = layout.placedCount >= ctx.state.props.data.length;
+    let top: number | null = null;
+    let bottom: number | null = null;
+    for (let column = 0; column < layout.numColumns; column++) {
+        const items = layout.columnItems[column];
+        const firstInRange = findFirstBelow(layout, positions, column, scrollTopBuffered);
+        if (firstInRange > 0) {
+            const edge = getItemBottom(layout, positions, column, firstInRange - 1);
+            top = top === null ? edge : Math.max(top, edge);
+        }
+        const firstAfterRange = findFirstStartingBelow(layout, positions, column, scrollBottomBuffered);
+        const edge =
+            firstAfterRange < items.length
+                ? positions[items[firstAfterRange]]
+                : isPlacementComplete
+                  ? null
+                  : layout.columnHeights[column];
+        if (edge !== null) {
+            bottom = bottom === null ? edge : Math.min(bottom, edge);
+        }
+    }
+    return { bottom, top };
 };
 
 const MasonryLegendList = React.forwardRef(function MasonryLegendListComponent<ItemT>(
