@@ -441,6 +441,19 @@ describe("MasonryLegendList layout", () => {
         await list.unmount();
     });
 
+    it("passes the refresh control through to the scroll view", async () => {
+        const refreshControl = <React.Fragment key="refresh" />;
+        const list = await mountMasonry({
+            data: makeCards(4, () => 100),
+            numColumns: 2,
+            refreshControl,
+            refreshing: true,
+        });
+
+        expect(lastListProps.refreshControl).toBe(refreshControl);
+        await list.unmount();
+    });
+
     it("forwards onScroll", async () => {
         const onScroll = mock(() => {});
         const cards = makeCards(30, () => 100);
