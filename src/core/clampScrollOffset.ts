@@ -18,6 +18,10 @@ export function clampScrollOffset(ctx: StateContext, offset: number, scrollTarge
         const maxOffset = baseMaxOffset + extraEndOffset;
         clampedOffset = Math.min(offset, maxOffset);
     }
-    clampedOffset = Math.max(0, clampedOffset);
+    // Masonry only: iOS rests at -contentInset.top under a transparent header, so that offset stays reachable.
+    const minOffset = state.props.layoutStrategyInternal
+        ? -((state.props.contentInset ?? state.nativeContentInset)?.top ?? 0)
+        : 0;
+    clampedOffset = Math.max(minOffset, clampedOffset);
     return clampedOffset;
 }

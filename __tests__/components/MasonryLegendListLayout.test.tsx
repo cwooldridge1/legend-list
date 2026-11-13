@@ -397,6 +397,27 @@ describe("MasonryLegendList layout", () => {
         await list.unmount();
     });
 
+    it("starts and scrolls back to the resting offset under a top inset", async () => {
+        const heights = Array.from({ length: 30 }, (_, index) => 60 + ((index * 37) % 140));
+        const cards = heights.map((height, index) => ({ height, id: `card-${index}` }));
+        const list = await mountMasonry({
+            contentInset: { bottom: 0, left: 0, right: 0, top: 96 },
+            data: cards,
+            initialScrollOffset: -96,
+            numColumns: 2,
+        });
+        expect(lastListProps.initialContentOffset).toBe(-96);
+
+        await list.scrollTo(600);
+        await act(async () => {
+            void list.ref.current?.scrollToOffset({ animated: false, offset: -96 });
+        });
+
+        expect(list.ctx.state.scroll).toBe(-96);
+        expect(list.missingVisible(cards, heights, 2, 0)).toEqual([]);
+        await list.unmount();
+    });
+
     it("offsets the range by contentContainerStyle padding", async () => {
         const heights = Array.from({ length: 30 }, (_, index) => 60 + ((index * 37) % 140));
         const cards = heights.map((height, index) => ({ height, id: `card-${index}` }));
